@@ -31,10 +31,11 @@ go build ./cmd/finder
 
 | Flag | Required | Description |
 | ---- | -------- | ----------- |
-| `--region` | No | OCI region (e.g., `us-phoenix-1`). Defaults to the region defined in the selected profile. |
+| `--region` | No | OCI region (e.g., `us-phoenix-1`). Defaults to the profile’s region unless an OCID-derived region is detected automatically. |
 | `--resource-type` | No | Resource type, e.g., `instance`, `bucket`, or `all` (default). |
 | `--resource-id` | Yes | Identifier/OCID of the desired resource |
 | `--profile` | No (default `DEFAULT`) | Profile from `~/.oci/config` |
+| `--debug` | No | Emits verbose logging about region inference and API calls. |
 
 ### Output
 
@@ -45,6 +46,7 @@ go build ./cmd/finder
 
 - Ensure the configured profile has permissions to `SEARCH`. Missing permissions result in authorization errors from the OCI SDK.
 - Verify the `identifier` field is correct for the resource type. Some resources may require alternate query fields.
+- If the CLI infers the wrong region from the OCID, override it explicitly with `--region`. You can also run with `--debug` to inspect the inference process.
 
 ## Development
 
