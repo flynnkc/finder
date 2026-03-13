@@ -34,7 +34,9 @@ func TestRegionFromOCID(t *testing.T) {
 		wantOK bool
 	}{
 		{"standardRegion", "ocid1.instance.oc1.us-phoenix-1.example", "us-phoenix-1", true},
+		{"shortAliasPhx", "ocid1.instance.oc1.phx.example", "us-phoenix-1", true},
 		{"caMontrealRegion", "ocid1.vcn.oc1.ca-montreal-1.ama", "ca-montreal-1", true},
+		{"shortAliasIad", "ocid1.instance.oc1.iad.example", "us-ashburn-1", true},
 		{"usesKnownGov", "ocid1.bucket.oc1.us-gov-phoenix-1.someid", "us-gov-phoenix-1", true},
 		{"invalidNoRegion", "ocid1.compartment.oc1..aaaa", "", false},
 		{"invalidGarbageToken", "ocid1.instance.oc1.x-y-z.example", "", false},

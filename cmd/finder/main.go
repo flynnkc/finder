@@ -180,24 +180,43 @@ var knownRegions = map[string]struct{}{
 }
 
 var regionTokenRegexp = regexp.MustCompile(`^[a-z]+(?:-[a-z0-9]+)+-\d+$`)
+var shortRegionAliases = map[string]string{
+	"iad": "us-ashburn-1",
+	"phx": "us-phoenix-1",
+	"sjc": "us-sanjose-1",
+	"chi": "us-chicago-1",
+	"aus": "us-austin-1",
+}
 
 func regionFromOCID(ocid string, provider common.ConfigurationProvider) (string, bool) {
 	debugf("Attempting to derive region from OCID: %s", ocid)
 	parts := strings.Split(ocid, ".")
 	for _, part := range parts {
 		candidate := strings.ToLower(part)
-		if !regionTokenRegexp.MatchString(candidate) {
-			debugf("Skipping token %s (not region-like)", candidate)
+		if regionTokenRegexp.MatchString(candidate) {
+			debugf("Evaluating candidate region token: %s", candidate)
+			if _, ok := knownRegions[candidate]; ok {
+				return candidate, true
+			}
+			debugf("Token %s not in known regions; checking Identity API", candidate)
+			if regionFromAPI, ok := checkRegionsFromIdentity(provider, candidate); ok {
+				return regionFromAPI, true
+			}
 			continue
 		}
-		debugf("Evaluating candidate region token: %s", candidate)
-		if _, ok := knownRegions[candidate]; ok {
-			return candidate, true
+
+		if full, ok := shortRegionAliases[candidate]; ok {
+			debugf("Translated short region code %s -> %s", candidate, full)
+			if _, exists := knownRegions[full]; exists {
+				return full, true
+			}
+			if regionFromAPI, ok := checkRegionsFromIdentity(provider, full); ok {
+				return regionFromAPI, true
+			}
+			continue
 		}
-		debugf("Token %s not in known regions; checking Identity API", candidate)
-		if regionFromAPI, ok := checkRegionsFromIdentity(provider, candidate); ok {
-			return regionFromAPI, true
-		}
+
+		debugf("Skipping token %s (not region-like)", candidate)
 	}
 	return "", false
 }
