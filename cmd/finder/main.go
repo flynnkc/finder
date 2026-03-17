@@ -6,69 +6,166 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
+	tokenpool "github.com/flynnkc/token-pool"
 	common "github.com/oracle/oci-go-sdk/v65/common"
 	identity "github.com/oracle/oci-go-sdk/v65/identity"
 	search "github.com/oracle/oci-go-sdk/v65/resourcesearch"
 )
+
+type queryResult struct {
+	OCID      string                   `json:"ocid"`
+	Region    string                   `json:"region,omitempty"`
+	Resources []search.ResourceSummary `json:"resources,omitempty"`
+	Message   string                   `json:"message,omitempty"`
+}
+
+type resourceSearchClient interface {
+	SetRegion(string)
+	SearchResources(context.Context, search.SearchResourcesRequest) (search.SearchResourcesResponse, error)
+}
 
 var debugEnabled bool
 
 func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(flag.CommandLine.Output(), "OCI Structured Search CLI\n\n")
-		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [--resource-type <type>] [--region <region>] [--profile <profile>] <resource-id>\n\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "Usage: %s [--resource-type <type>] [--region <region>] [--profile <profile>] <resource-id> [<resource-id> ...]\n\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 
 	region := flag.String("region", "", "OCI region to target (defaults to profile region)")
 	profile := flag.String("profile", "DEFAULT", "OCI CLI profile name from ~/.oci/config")
 	resourceType := flag.String("resource-type", "all", "OCI resource type to search (defaults to all)")
+	workerCount := flag.Int("concurrency", 5, "Maximum number of concurrent OCI search requests")
+	rateLimit := flag.Int("rate-limit", 5, "Number of requests replenished every rate interval")
+	rateInterval := flag.Duration("rate-interval", time.Second, "Interval for rate-limit replenishment (e.g. 1s, 500ms)")
+	rateBurst := flag.Int("rate-burst", 5, "Maximum burst size for rate limiting (defaults to rate-limit)")
 	flag.BoolVar(&debugEnabled, "debug", false, "Enable verbose debug logging")
 
 	flag.Parse()
 
 	args := flag.Args()
-	if len(args) != 1 {
+	if len(args) == 0 {
 		flag.Usage()
-		fmt.Fprintln(os.Stderr, "error: resource-id positional argument is required")
+		fmt.Fprintln(os.Stderr, "error: at least one resource-id positional argument is required")
 		os.Exit(1)
 	}
-	resourceID := args[0]
+	resourceIDs := args
 
-	if err := run(*region, *profile, *resourceType, resourceID); err != nil {
+	if err := run(*region, *profile, *resourceType, resourceIDs, *workerCount, *rateLimit, *rateBurst, *rateInterval); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(region, profile, resourceType, resourceID string) error {
+func run(region, profile, resourceType string, resourceIDs []string, workerCount, rateLimit, rateBurst int, rateInterval time.Duration) error {
 	configProvider, err := configurationProvider(profile)
 	if err != nil {
 		return fmt.Errorf("load OCI config: %w", err)
 	}
 
-	regionToUse, err := resolveRegion(region, resourceID, configProvider)
-	if err != nil {
-		return err
-	}
-	debugf("Using region %s", regionToUse)
-
 	client, err := search.NewResourceSearchClientWithConfigurationProvider(configProvider)
 	if err != nil {
 		return fmt.Errorf("create resource search client: %w", err)
 	}
-	client.SetRegion(regionToUse)
 
 	resourceScope := resourceType
 	if resourceScope == "" {
 		resourceScope = "all"
 	}
+
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+	if rateBurst <= 0 {
+		rateBurst = rateLimit
+	}
+	if rateBurst <= 0 {
+		rateBurst = workerCount
+	}
+	if rateLimit <= 0 {
+		rateLimit = workerCount
+	}
+	if rateInterval <= 0 {
+		rateInterval = time.Second
+	}
+
+	pool := tokenpool.NewTokenPool(rateBurst, rateLimit, rateInterval)
+	defer pool.Close()
+	acquire := func(ctx context.Context) bool {
+		return pool.Acquire(ctx)
+	}
+
+	ctx, cancel := signalContext()
+	defer cancel()
+
+	type job struct {
+		index int
+		ocid  string
+	}
+
+	jobs := make(chan job)
+	results := make([]queryResult, len(resourceIDs))
+	var wg sync.WaitGroup
+	wg.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				res := processResourceID(ctx, &client, configProvider, region, resourceScope, j.ocid, acquire)
+				results[j.index] = res
+			}
+		}()
+	}
+
+	for idx, ocid := range resourceIDs {
+		select {
+		case <-ctx.Done():
+			close(jobs)
+			wg.Wait()
+			return ctx.Err()
+		case jobs <- job{index: idx, ocid: ocid}:
+		}
+	}
+	close(jobs)
+	wg.Wait()
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(results)
+}
+
+func processResourceID(parentCtx context.Context, client resourceSearchClient, provider common.ConfigurationProvider, flagRegion, resourceScope, resourceID string, acquire func(context.Context) bool) queryResult {
+	result := queryResult{OCID: resourceID}
+
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	if acquire != nil {
+		if !acquire(ctx) {
+			result.Message = "rate limit not available"
+			return result
+		}
+	}
+
+	regionToUse, err := resolveRegion(flagRegion, resourceID, provider)
+	if err != nil {
+		result.Message = fmt.Sprintf("resolve region: %v", err)
+		return result
+	}
+
+	result.Region = regionToUse
+	debugf("Using region %s for %s", regionToUse, resourceID)
+	client.SetRegion(regionToUse)
+
 	query := fmt.Sprintf("query %s resources where identifier = '%s'", resourceScope, resourceID)
 	request := search.SearchResourcesRequest{
 		SearchDetails: search.StructuredSearchDetails{
@@ -78,22 +175,22 @@ func run(region, profile, resourceType, resourceID string) error {
 		Limit: common.Int(25),
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	response, err := client.SearchResources(ctx, request)
 	if err != nil {
-		return fmt.Errorf("search resources: %w", err)
+		result.Message = fmt.Sprintf("search resources: %v", err)
+		return result
 	}
 
 	if len(response.Items) == 0 {
-		fmt.Println("No resources found matching the criteria.")
-		return nil
+		result.Message = "No resources found matching the criteria."
+		return result
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(response.Items)
+	result.Resources = response.Items
+	return result
 }
 
 func configurationProvider(profile string) (common.ConfigurationProvider, error) {
@@ -265,4 +362,20 @@ func debugf(format string, args ...interface{}) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[debug] "+format+"\n", args...)
+}
+
+func signalContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-sigCh:
+			cancel()
+		case <-ctx.Done():
+		}
+		signal.Stop(sigCh)
+		close(sigCh)
+	}()
+	return ctx, cancel
 }

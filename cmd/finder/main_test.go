@@ -1,28 +1,67 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
+	"errors"
 	"testing"
 
 	common "github.com/oracle/oci-go-sdk/v65/common"
+	search "github.com/oracle/oci-go-sdk/v65/resourcesearch"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
 type mockProvider struct {
 	mock.Mock
+	region    string
+	regionErr error
 }
 
 func (m *mockProvider) TenancyOCID() (string, error)    { return "", nil }
 func (m *mockProvider) UserOCID() (string, error)       { return "", nil }
 func (m *mockProvider) KeyFingerprint() (string, error) { return "", nil }
-func (m *mockProvider) Region() (string, error)         { return "", nil }
+func (m *mockProvider) Region() (string, error) {
+	if m.regionErr != nil {
+		return "", m.regionErr
+	}
+	return m.region, nil
+}
 func (m *mockProvider) PrivateRSAKey() (*rsa.PrivateKey, error) {
 	return nil, nil
 }
 func (m *mockProvider) KeyPassphrase() (*string, error)      { return nil, nil }
 func (m *mockProvider) AuthType() (common.AuthConfig, error) { return common.AuthConfig{}, nil }
 func (m *mockProvider) KeyID() (string, error)               { return "", nil }
+
+type stubSearchClient struct {
+	region     string
+	items      []search.ResourceSummary
+	respErr    error
+	lastQuery  string
+	callCount  int
+	limitValue *int
+}
+
+func (s *stubSearchClient) SetRegion(region string) {
+	s.region = region
+}
+
+func (s *stubSearchClient) SearchResources(_ context.Context, req search.SearchResourcesRequest) (search.SearchResourcesResponse, error) {
+	s.callCount++
+	if details, ok := req.SearchDetails.(search.StructuredSearchDetails); ok {
+		if details.Query != nil {
+			s.lastQuery = *details.Query
+		}
+	}
+	s.limitValue = req.Limit
+	resp := search.SearchResourcesResponse{}
+	resp.RawResponse = nil
+	resp.ResourceSummaryCollection = search.ResourceSummaryCollection{
+		Items: s.items,
+	}
+	return resp, s.respErr
+}
 
 func TestRegionFromOCID(t *testing.T) {
 	provider := &mockProvider{}
@@ -49,4 +88,81 @@ func TestRegionFromOCID(t *testing.T) {
 			require.Equal(t, tc.want, got, "unexpected region for %s", tc.ocid)
 		})
 	}
+}
+
+func TestProcessResourceID(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		client := &stubSearchClient{
+			items: []search.ResourceSummary{{Identifier: common.String("example")}},
+		}
+		provider := &mockProvider{}
+		result := processResourceID(context.Background(), client, provider, "us-phoenix-1", "instance", "ocid1.example", nil)
+
+		require.Equal(t, "us-phoenix-1", result.Region)
+		require.Equal(t, 1, len(result.Resources))
+		require.Equal(t, "", result.Message)
+		require.Equal(t, "query instance resources where identifier = 'ocid1.example'", client.lastQuery)
+	})
+
+	t.Run("search error added to message", func(t *testing.T) {
+		client := &stubSearchClient{
+			respErr: errors.New("boom"),
+		}
+		provider := &mockProvider{}
+		result := processResourceID(context.Background(), client, provider, "us-phoenix-1", "instance", "ocid1.err", nil)
+
+		require.Contains(t, result.Message, "search resources: boom")
+		require.Nil(t, result.Resources)
+	})
+
+	t.Run("no results still recorded", func(t *testing.T) {
+		client := &stubSearchClient{}
+		provider := &mockProvider{}
+		result := processResourceID(context.Background(), client, provider, "us-phoenix-1", "instance", "ocid1.none", nil)
+
+		require.Equal(t, "No resources found matching the criteria.", result.Message)
+		require.Nil(t, result.Resources)
+	})
+
+	t.Run("region resolution error stored", func(t *testing.T) {
+		provider := &mockProvider{regionErr: errors.New("bad region")}
+		client := &stubSearchClient{}
+		result := processResourceID(context.Background(), client, provider, "", "instance", "ocid1.none", nil)
+
+		require.Contains(t, result.Message, "resolve region: determine region from profile: bad region")
+	})
+}
+
+type fakeTokenPool struct {
+	tokens chan struct{}
+}
+
+func newFakeTokenPool(size int) *fakeTokenPool {
+	return &fakeTokenPool{tokens: make(chan struct{}, size)}
+}
+
+func (f *fakeTokenPool) Acquire(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case f.tokens <- struct{}{}:
+		return true
+	}
+}
+
+func (f *fakeTokenPool) Token() bool {
+	select {
+	case <-f.tokens:
+		return true
+	default:
+		return false
+	}
+}
+
+func TestProcessResourceIDRateLimit(t *testing.T) {
+	acquire := func(context.Context) bool { return false }
+	client := &stubSearchClient{}
+	provider := &mockProvider{}
+	result := processResourceID(context.Background(), client, provider, "us-phoenix-1", "instance", "ocid1.rate", acquire)
+	require.Equal(t, "rate limit not available", result.Message)
 }

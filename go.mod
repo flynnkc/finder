@@ -3,6 +3,7 @@ module github.com/flynnkc/finder
 go 1.24.3
 
 require (
+	github.com/flynnkc/token-pool v1.0.0
 	github.com/oracle/oci-go-sdk/v65 v65.109.1
 	github.com/stretchr/testify v1.11.1
 )
