@@ -166,3 +166,44 @@ func TestProcessResourceIDRateLimit(t *testing.T) {
 	result := processResourceID(context.Background(), client, provider, "us-phoenix-1", "instance", "ocid1.rate", acquire)
 	require.Equal(t, "rate limit not available", result.Message)
 }
+
+func TestNormalizeResourceIDs(t *testing.T) {
+	testCases := []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{
+			name:  "already clean",
+			input: []string{"ocid1", "ocid2"},
+			want:  []string{"ocid1", "ocid2"},
+		},
+		{
+			name:  "quoted with newlines",
+			input: []string{"\"ocid1\"\n\"ocid2\"\n\"ocid3\""},
+			want:  []string{"ocid1", "ocid2", "ocid3"},
+		},
+		{
+			name:  "single quotes and spaces",
+			input: []string{"'ocid1' 'ocid2'"},
+			want:  []string{"ocid1", "ocid2"},
+		},
+		{
+			name:  "mixed clean and dirty",
+			input: []string{"ocid1", "\"ocid2\""},
+			want:  []string{"ocid1", "ocid2"},
+		},
+		{
+			name:  "empty after cleaning",
+			input: []string{"\"\""},
+			want:  nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normalizeResourceIDs(tc.input)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

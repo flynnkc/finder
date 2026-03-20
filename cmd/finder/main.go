@@ -52,18 +52,31 @@ func main() {
 
 	flag.Parse()
 
-	args := flag.Args()
-	if len(args) == 0 {
+	resourceIDs := normalizeResourceIDs(flag.Args())
+	if len(resourceIDs) == 0 {
 		flag.Usage()
 		fmt.Fprintln(os.Stderr, "error: at least one resource-id positional argument is required")
 		os.Exit(1)
 	}
-	resourceIDs := args
 
 	if err := run(*region, *profile, *resourceType, resourceIDs, *workerCount, *rateLimit, *rateBurst, *rateInterval); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func normalizeResourceIDs(rawArgs []string) []string {
+	if len(rawArgs) == 0 {
+		return nil
+	}
+	replacer := strings.NewReplacer("\"", "", "'", "")
+	joined := strings.Join(rawArgs, "\n")
+	cleaned := replacer.Replace(joined)
+	fields := strings.Fields(cleaned)
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }
 
 func run(region, profile, resourceType string, resourceIDs []string, workerCount, rateLimit, rateBurst int, rateInterval time.Duration) error {
