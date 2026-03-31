@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rsa"
 	"errors"
+	"log/slog"
 	"testing"
 
 	common "github.com/oracle/oci-go-sdk/v65/common"
@@ -160,11 +162,14 @@ func (f *fakeTokenPool) Token() bool {
 }
 
 func TestProcessResourceIDRateLimit(t *testing.T) {
+	buf, restore := withTestLogger()
+	defer restore()
 	acquire := func(context.Context) bool { return false }
 	client := &stubSearchClient{}
 	provider := &mockProvider{}
 	result := processResourceID(context.Background(), client, provider, "us-phoenix-1", "instance", "ocid1.rate", acquire)
 	require.Equal(t, "rate limit not available", result.Message)
+	require.Contains(t, buf.String(), "rate limit not available")
 }
 
 func TestNormalizeResourceIDs(t *testing.T) {
@@ -205,5 +210,37 @@ func TestNormalizeResourceIDs(t *testing.T) {
 			got := normalizeResourceIDs(tc.input)
 			require.Equal(t, tc.want, got)
 		})
+	}
+}
+
+func TestEffectiveWorkerCount(t *testing.T) {
+	testCases := []struct {
+		name      string
+		requested int
+		total     int
+		want      int
+	}{
+		{"requestedZero", 0, 5, 1},
+		{"requestedNegative", -3, 4, 1},
+		{"requestedWithinTotal", 3, 5, 3},
+		{"requestedExceedsTotal", 10, 2, 2},
+		{"noResources", 5, 0, 5},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := effectiveWorkerCount(tc.requested, tc.total)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func withTestLogger() (*bytes.Buffer, func()) {
+	buf := &bytes.Buffer{}
+	prev := logger
+	handler := slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger = slog.New(handler)
+	return buf, func() {
+		logger = prev
 	}
 }

@@ -38,8 +38,8 @@ go build ./cmd/finder
 | `--resource-type` | No | Resource type, e.g., `instance`, `bucket`, or `all` (default). |
 | `resource-id` (positional) | Yes | One or more identifiers/OCIDs to search |
 | `--profile` | No (default `DEFAULT`) | Profile from `~/.oci/config` |
-| `--debug` | No | Emits verbose logging about region inference and API calls. |
-| `--concurrency` | No (default `5`) | Maximum number of concurrent OCI search workers |
+| `--debug` | No | Emits structured debug logging (Go `slog` text format) detailing region inference, rate limiting, worker lifecycle, and OCI API responses. |
+| `--concurrency` | No (default `5`) | Maximum number of concurrent OCI search workers; automatically capped to the number of OCIDs provided |
 | `--rate-limit` | No (default `5`) | Number of requests replenished each `--rate-interval` |
 | `--rate-interval` | No (default `1s`) | Interval governing token refills (e.g., `500ms`, `2s`) |
 | `--rate-burst` | No (default `rate-limit`) | Maximum burst size; controls token pool capacity |
@@ -58,6 +58,8 @@ go build ./cmd/finder
 - Ensure the configured profile has permissions to `SEARCH`. Missing permissions result in authorization errors from the OCI SDK.
 - Verify the `identifier` field is correct for the resource type. Some resources may require alternate query fields.
 - If the CLI infers the wrong region from the OCID, override it explicitly with `--region`. You can also run with `--debug` to inspect the inference process and see which tokens (including short codes) were evaluated.
+- When diagnosing rate limiting or empty responses, re-run with `--debug` to view structured events showing worker progress, token acquisition, and OCI error payloads.
+- Single OCID searches are processed synchronously to avoid unnecessary worker spin-up.
 
 ## Development
 
